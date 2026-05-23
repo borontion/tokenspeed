@@ -460,8 +460,8 @@ class TestDeepseekV4Config(unittest.TestCase):
             },
         )
 
-        # num_tokens = padded_bs * max_tokens_per_req is passed as 2nd positional.
-        self.assertEqual(captured["args"][1], 4)
+        # padded_bs is the first positional arg.
+        self.assertEqual(captured["args"][0], 4)
         self.assertEqual(captured["kwargs"]["actual_bs"], 0)
         self.assertEqual(
             captured["kwargs"]["paged_cache_block_tables"]["v4.swa"].shape,
@@ -968,17 +968,17 @@ class TestDeepseekV4Config(unittest.TestCase):
             max_scheduled_tokens=1,
         )
 
-        self.assertEqual(tuple(pool.get_swa_kv_buffer(0).shape), (7, 37440))
+        self.assertEqual(tuple(pool.get_swa_kv_buffer(0).shape), (8, 37440))
         self.assertIsNone(pool.compressed_kv_buffer[0])
         self.assertEqual(tuple(pool.get_compressed_kv_buffer_2d(1).shape), (4, 37440))
-        self.assertEqual(tuple(pool.get_compressor_state_buffer(1).shape), (7, 4, 2048))
+        self.assertEqual(tuple(pool.get_compressor_state_buffer(1).shape), (8, 4, 2048))
         self.assertEqual(
-            tuple(pool.get_compressor_state_buffer(2).shape), (35, 8, 1024)
+            tuple(pool.get_compressor_state_buffer(2).shape), (36, 8, 1024)
         )
         self.assertEqual(pool.get_compressor_state_buffer(1).dtype, torch.float32)
         self.assertEqual(pool.get_compressor_state_buffer(2).dtype, torch.float32)
         self.assertEqual(tuple(pool.get_indexer_kv_buffer_2d(1).shape), (4, 64 * 68))
-        self.assertEqual(tuple(pool.get_indexer_state_buffer(1).shape), (7, 4, 512))
+        self.assertEqual(tuple(pool.get_indexer_state_buffer(1).shape), (8, 4, 512))
         self.assertEqual(pool.get_indexer_state_buffer(1).dtype, torch.float32)
 
     def test_deepseek_v4_kv_pool_uses_compressed_storage_blocks_for_page256(self):
@@ -1066,6 +1066,7 @@ class TestDeepseekV4Config(unittest.TestCase):
                 attn_tp_size=1,
                 dtype=torch.bfloat16,
                 is_draft=False,
+                speculative_num_draft_tokens=1,
                 head_dim=512,
                 context_len=4096,
             )
@@ -1075,7 +1076,6 @@ class TestDeepseekV4Config(unittest.TestCase):
 
         backend.init_forward_metadata(
             bs=2,
-            num_tokens=2,
             req_pool_indices=torch.tensor([0, 1], dtype=torch.int64),
             seq_lens=torch.tensor([200, 80], dtype=torch.int32),
             forward_mode=ForwardMode.DECODE,
@@ -1100,6 +1100,7 @@ class TestDeepseekV4Config(unittest.TestCase):
                 attn_tp_size=1,
                 dtype=torch.bfloat16,
                 is_draft=False,
+                speculative_num_draft_tokens=1,
                 head_dim=512,
                 context_len=4096,
             )
@@ -1107,7 +1108,6 @@ class TestDeepseekV4Config(unittest.TestCase):
 
         backend.init_forward_metadata(
             bs=3,
-            num_tokens=10,
             req_pool_indices=torch.tensor([0, 1, 2], dtype=torch.int64),
             seq_lens=torch.tensor([7, 10, 4], dtype=torch.int32),
             forward_mode=ForwardMode.MIXED,
@@ -1140,6 +1140,7 @@ class TestDeepseekV4Config(unittest.TestCase):
                 attn_tp_size=1,
                 dtype=torch.bfloat16,
                 is_draft=False,
+                speculative_num_draft_tokens=1,
                 head_dim=512,
                 context_len=4096,
             )
@@ -1178,6 +1179,7 @@ class TestDeepseekV4Config(unittest.TestCase):
                 attn_tp_size=1,
                 dtype=torch.bfloat16,
                 is_draft=False,
+                speculative_num_draft_tokens=1,
                 head_dim=512,
                 context_len=4096,
             )
@@ -1192,7 +1194,6 @@ class TestDeepseekV4Config(unittest.TestCase):
 
         backend.init_forward_metadata(
             bs=2,
-            num_tokens=2,
             req_pool_indices=torch.tensor([0, 1], dtype=torch.int64),
             seq_lens=torch.tensor([200, 80], dtype=torch.int32),
             forward_mode=ForwardMode.DECODE,
@@ -1244,6 +1245,7 @@ class TestDeepseekV4Config(unittest.TestCase):
                 attn_tp_size=1,
                 dtype=torch.bfloat16,
                 is_draft=False,
+                speculative_num_draft_tokens=1,
                 head_dim=512,
                 context_len=4096,
             )
@@ -1444,13 +1446,13 @@ class TestDeepseekV4Config(unittest.TestCase):
                 attn_tp_size=1,
                 dtype=torch.bfloat16,
                 is_draft=False,
+                speculative_num_draft_tokens=1,
                 head_dim=576,
                 context_len=256,
             )
         )
         backend.init_forward_metadata(
             bs=3,
-            num_tokens=5,
             req_pool_indices=torch.tensor([0, 1, 2], dtype=torch.int32),
             seq_lens=torch.tensor([5, 9, 12], dtype=torch.int32),
             forward_mode=ForwardMode.MIXED,
@@ -1530,13 +1532,13 @@ class TestDeepseekV4Config(unittest.TestCase):
                 attn_tp_size=1,
                 dtype=torch.bfloat16,
                 is_draft=False,
+                speculative_num_draft_tokens=1,
                 head_dim=576,
                 context_len=256,
             )
         )
         backend.init_forward_metadata(
             bs=4,
-            num_tokens=8,
             req_pool_indices=torch.tensor([0, 1, 2, 3], dtype=torch.int32),
             seq_lens=torch.tensor([5, 9, 12, 6], dtype=torch.int32),
             forward_mode=ForwardMode.MIXED,
@@ -1575,13 +1577,13 @@ class TestDeepseekV4Config(unittest.TestCase):
                 attn_tp_size=1,
                 dtype=torch.bfloat16,
                 is_draft=False,
+                speculative_num_draft_tokens=1,
                 head_dim=576,
                 context_len=256,
             )
         )
         backend.init_forward_metadata(
             bs=3,
-            num_tokens=5,
             req_pool_indices=torch.tensor([0, 1, 2], dtype=torch.int32),
             seq_lens=torch.tensor([5, 9, 12], dtype=torch.int32),
             forward_mode=ForwardMode.MIXED,
@@ -1669,6 +1671,7 @@ class TestDeepseekV4Config(unittest.TestCase):
                 attn_tp_size=1,
                 dtype=torch.bfloat16,
                 is_draft=False,
+                speculative_num_draft_tokens=1,
                 head_dim=512,
                 context_len=128,
             )
@@ -1676,7 +1679,6 @@ class TestDeepseekV4Config(unittest.TestCase):
         seq_lens = torch.tensor([70, 3], dtype=torch.int32)
         backend.init_forward_metadata(
             bs=2,
-            num_tokens=2,
             req_pool_indices=torch.tensor([0, 1], dtype=torch.int64),
             seq_lens=seq_lens,
             forward_mode=ForwardMode.DECODE,
@@ -1708,7 +1710,6 @@ class TestDeepseekV4Config(unittest.TestCase):
         seq_lens = torch.tensor([256, 129], dtype=torch.int32)
         backend.init_forward_metadata(
             bs=2,
-            num_tokens=2,
             req_pool_indices=torch.tensor([0, 1], dtype=torch.int64),
             seq_lens=seq_lens,
             forward_mode=ForwardMode.DECODE,
@@ -1755,6 +1756,7 @@ class TestDeepseekV4Config(unittest.TestCase):
                 attn_tp_size=1,
                 dtype=torch.bfloat16,
                 is_draft=False,
+                speculative_num_draft_tokens=1,
                 head_dim=512,
                 context_len=128,
             )
@@ -1762,7 +1764,6 @@ class TestDeepseekV4Config(unittest.TestCase):
         seq_lens = torch.tensor([128, 64], device=device, dtype=torch.int32)
         backend.init_forward_metadata(
             bs=2,
-            num_tokens=2,
             req_pool_indices=torch.tensor([0, 1], device=device, dtype=torch.int64),
             seq_lens=seq_lens,
             forward_mode=ForwardMode.DECODE,
@@ -1816,6 +1817,7 @@ class TestDeepseekV4Config(unittest.TestCase):
                 attn_tp_size=1,
                 dtype=torch.bfloat16,
                 is_draft=False,
+                speculative_num_draft_tokens=1,
                 head_dim=512,
                 context_len=1024,
             )
@@ -1933,6 +1935,7 @@ class TestDeepseekV4Config(unittest.TestCase):
                 attn_tp_size=1,
                 dtype=torch.bfloat16,
                 is_draft=False,
+                speculative_num_draft_tokens=1,
                 head_dim=512,
                 context_len=128,
             )
@@ -1940,7 +1943,6 @@ class TestDeepseekV4Config(unittest.TestCase):
         seq_lens = torch.tensor([70, 3], dtype=torch.int32)
         backend.init_forward_metadata(
             bs=2,
-            num_tokens=2,
             req_pool_indices=torch.tensor([0, 1], dtype=torch.int64),
             seq_lens=seq_lens,
             forward_mode=ForwardMode.DECODE,
@@ -1997,6 +1999,7 @@ class TestDeepseekV4Config(unittest.TestCase):
                 attn_tp_size=1,
                 dtype=torch.bfloat16,
                 is_draft=False,
+                speculative_num_draft_tokens=1,
                 head_dim=512,
                 context_len=128,
             )
@@ -2004,7 +2007,6 @@ class TestDeepseekV4Config(unittest.TestCase):
         backend.init_cuda_graph_state(max_bs=4)
         backend.init_forward_metadata_capture_cuda_graph(
             bs=4,
-            num_tokens=4,
             req_pool_indices=torch.arange(4, dtype=torch.int32),
             seq_lens=torch.ones(4, dtype=torch.int32),
             forward_mode=ForwardMode.DECODE,
@@ -2012,7 +2014,6 @@ class TestDeepseekV4Config(unittest.TestCase):
 
         backend.init_forward_metadata_replay_cuda_graph(
             bs=4,
-            num_tokens=4,
             actual_bs=2,
             req_pool_indices=torch.arange(4, dtype=torch.int32),
             seq_lens=torch.tensor([70, 3, 1, 1], dtype=torch.int32),
