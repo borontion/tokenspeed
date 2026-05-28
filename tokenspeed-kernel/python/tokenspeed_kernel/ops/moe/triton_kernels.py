@@ -67,6 +67,44 @@ from triton_kernels.tensor_details import layout
 from triton_kernels.topk import topk
 
 
+def swizzle_mxfp4(quant_tensor, scale, num_warps):
+    """Weight swizzle for MXFP4 MoE triton_kernels matmul."""
+
+    if layout is None:
+        raise RuntimeError("triton_kernels backend unavailable")
+
+    value_layout = layout.make_default_matmul_mxfp4_w_layout(mx_axis=-2)
+    scale_layout = layout.make_default_matmul_mxfp4_w_scale_layout(
+        mx_axis=-2, num_warps=num_warps
+    )
+    platform = current_platform()
+    if platform.is_blackwell:
+        constraints = {
+            "is_persistent": True,
+            "epilogue_subtile": 1,
+        }
+        opt_flags.update_opt_flags_constraints(constraints)
+    elif platform.is_hopper:
+        constraints = {
+            "split_k": 1,
+        }
+        opt_flags.update_opt_flags_constraints(constraints)
+    elif platform.is_amd:
+        # Fix block_k=256 to support scale swizzling.
+        constraints = {
+            "block_k": 256,
+        }
+        opt_flags.update_opt_flags_constraints(constraints)
+
+    quant_tensor = quant_tensor.transpose(-2, -1)
+    scale = scale.transpose(-2, -1)
+    quant_tensor = convert_layout(
+        wrap_torch_tensor(quant_tensor, dtype=FP4), value_layout
+    )
+    scale = convert_layout(wrap_torch_tensor(scale), scale_layout)
+    return quant_tensor, InFlexData(), scale
+
+
 def _is_bf16_mxfp4(x, w, precision_config):
     if precision_config is None:
         return False
@@ -224,6 +262,7 @@ __all__ = [
     "convert_layout",
     "layout",
     "opt_flags",
+    "swizzle_mxfp4",
     "swiglu_fn",
     "wrap_torch_tensor",
 ]

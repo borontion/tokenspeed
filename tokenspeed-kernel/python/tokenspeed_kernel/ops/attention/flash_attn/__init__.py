@@ -20,6 +20,7 @@
 import math
 
 import torch
+from tokenspeed_kernel.context import _current_kernel_context
 from tokenspeed_kernel.platform import (
     ArchVersion,
     CapabilityRequirement,
@@ -42,6 +43,46 @@ flash_attn_with_kvcache = error_fn
 get_scheduler_metadata = error_fn
 
 platform = current_platform()
+
+_FA3_DECODE_CONTEXT_NAMESPACE = "tokenspeed_kernel.ops.attention.flash_attn.fa3_decode"
+_FA3_DECODE_SCHEDULER_METADATA = "scheduler_metadata"
+
+
+def _fa3_decode_scheduler_metadata_from_context(
+    *,
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    cache_seqlens: torch.Tensor,
+    max_seqlen_k: int,
+    window_left: int,
+    logit_cap: float,
+    sinks: torch.Tensor | None,
+) -> torch.Tensor | None:
+    if get_scheduler_metadata is error_fn:
+        return None
+    if window_left >= 0 or logit_cap != 0.0 or sinks is not None:
+        return None
+
+    context = _current_kernel_context()
+    if context is None:
+        return None
+
+    namespace = context.namespace(_FA3_DECODE_CONTEXT_NAMESPACE)
+    if _FA3_DECODE_SCHEDULER_METADATA not in namespace:
+        namespace[_FA3_DECODE_SCHEDULER_METADATA] = get_scheduler_metadata(
+            batch_size=q.shape[0],
+            max_seqlen_q=1,
+            max_seqlen_k=max_seqlen_k,
+            num_heads_q=q.shape[1],
+            num_heads_kv=k_cache.shape[2],
+            headdim=q.shape[2],
+            cache_seqlens=cache_seqlens,
+            qkv_dtype=q.dtype,
+            page_size=k_cache.shape[1],
+            causal=True,
+        )
+    return namespace[_FA3_DECODE_SCHEDULER_METADATA]
+
 
 # ------------------------------------------------------------------------------
 # Kernel registration
@@ -393,6 +434,16 @@ elif platform.is_nvidia and platform.is_hopper:
     ) -> torch.Tensor:
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(q.shape[-1])
+        if scheduler_metadata is None:
+            scheduler_metadata = _fa3_decode_scheduler_metadata_from_context(
+                q=q,
+                k_cache=k_cache,
+                cache_seqlens=cache_seqlens,
+                max_seqlen_k=max_seqlen_k,
+                window_left=window_left,
+                logit_cap=logit_cap,
+                sinks=sinks,
+            )
         out = flash_attn_with_kvcache(
             q=q.unsqueeze(1),
             k_cache=k_cache,

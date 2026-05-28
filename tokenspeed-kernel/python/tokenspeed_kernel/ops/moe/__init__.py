@@ -32,6 +32,7 @@ import tokenspeed_kernel.ops.moe.triton  # noqa: F401
 import tokenspeed_kernel.ops.moe.triton_kernels  # noqa: F401
 import tokenspeed_kernel.ops.moe.trtllm  # noqa: F401
 import torch
+from tokenspeed_kernel.context import _current_kernel_context
 from tokenspeed_kernel.ops.moe.expert_location_dispatch import (  # noqa: F401
     ExpertLocationDispatchInfo,
     topk_ids_logical_to_physical,
@@ -82,6 +83,9 @@ __all__ = [
     "moe_combine",
     "moe_fused",
 ]
+
+_MOE_CONTEXT_NAMESPACE = "tokenspeed_kernel.ops.moe.selection"
+_MOE_CONTEXT_SOLUTION = "solution"
 
 # ---------------------------------------------------------------------------
 # Interface feature constants — used by both registration and API calls
@@ -177,11 +181,29 @@ def _moe_fused_format_signature(
     return format_signature(x=x, weight=weight)
 
 
+def _context_kernel_solution(
+    family: str,
+    mode: str,
+    solution: str | None,
+) -> str | None:
+    if solution is not None:
+        return solution
+    context = _current_kernel_context()
+    if context is None:
+        return None
+    namespace = context.namespace(_MOE_CONTEXT_NAMESPACE)
+    message = namespace.get(_MOE_CONTEXT_SOLUTION)
+    if isinstance(message, str):
+        return message
+    return None
+
+
 def moe_route(
     *args,
     dtype: torch.dtype = torch.bfloat16,
     features: Optional[Set[str]] = None,
     traits: Optional[dict] = None,
+    solution: str | None = None,
     expected_kernel_name: Optional[str] = None,
     **kwargs,
 ):
@@ -196,12 +218,14 @@ def moe_route(
     * ``{"grouped": True/False}``: whether grouped expert selection is used.
     """
     signature = _single_dense_tensor_format_signature("logits", dtype)
+    solution = _context_kernel_solution("moe", "route", solution)
     kernel = select_kernel(
         "moe",
         "route",
         signature,
         features=frozenset(features) if features else None,
         traits=traits or {},
+        solution=solution,
         expected_kernel_name=expected_kernel_name,
     )
 
@@ -237,6 +261,7 @@ def moe_experts(
     dtype: torch.dtype = torch.bfloat16,
     features: Optional[Set[str]] = None,
     traits: Optional[dict] = None,
+    solution: str | None = None,
     expected_kernel_name: Optional[str] = None,
     **kwargs,
 ):
@@ -254,12 +279,14 @@ def moe_experts(
     * ``{"gemm_combine"}``: GEMM then scatter/combine results (uses scatter_indx).
     """
     signature = _single_dense_tensor_format_signature("x", dtype)
+    solution = _context_kernel_solution("moe", "experts", solution)
     kernel = select_kernel(
         "moe",
         "experts",
         signature,
         features=frozenset(features) if features else None,
         traits=traits or {},
+        solution=solution,
         expected_kernel_name=expected_kernel_name,
     )
 

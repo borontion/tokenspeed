@@ -23,17 +23,13 @@ from __future__ import annotations
 import tokenspeed_kernel
 import torch
 from tokenspeed_kernel.ops.moe.triton_kernels import (
-    FP4,
     FlexCtx,
     FnSpecs,
     FusedActivation,
     InFlexData,
     PrecisionConfig,
-    convert_layout,
-    layout,
-    opt_flags,
     swiglu_fn,
-    wrap_torch_tensor,
+    swizzle_mxfp4,
 )
 from tokenspeed_kernel.platform import current_platform
 from torch import nn
@@ -51,47 +47,6 @@ from tokenspeed.runtime.layers.quantization import Mxfp4Config
 from tokenspeed.runtime.layers.quantization.utils import should_ignore_quant_layer
 from tokenspeed.runtime.utils import round_up
 
-_is_blackwell = current_platform().is_blackwell
-_is_hopper = current_platform().is_hopper
-_is_amd = current_platform().is_amd
-
-
-def swizzle_mxfp4(quant_tensor, scale, num_warps):
-    """Weight swizzle for mxfp4 MoE, used for OAI mxfp4 kernel."""
-
-    if layout is None:
-        raise RuntimeError("triton_kernels backend unavailable")
-
-    value_layout = layout.make_default_matmul_mxfp4_w_layout(mx_axis=-2)
-    scale_layout = layout.make_default_matmul_mxfp4_w_scale_layout(
-        mx_axis=-2, num_warps=num_warps
-    )
-    if _is_blackwell:
-        constraints = {
-            "is_persistent": True,
-            "epilogue_subtile": 1,
-        }
-        opt_flags.update_opt_flags_constraints(constraints)
-    elif _is_hopper:
-        constraints = {
-            "split_k": 1,
-        }
-        opt_flags.update_opt_flags_constraints(constraints)
-    elif _is_amd:
-        # Fix block_k=256 to support scale swizzling.
-        constraints = {
-            "block_k": 256,
-        }
-        opt_flags.update_opt_flags_constraints(constraints)
-    # transpose the tensor so that the quantization axis is on dim1
-    quant_tensor = quant_tensor.transpose(-2, -1)
-    scale = scale.transpose(-2, -1)
-    quant_tensor = convert_layout(
-        wrap_torch_tensor(quant_tensor, dtype=FP4), value_layout
-    )
-    scale = convert_layout(wrap_torch_tensor(scale), scale_layout)
-    return quant_tensor, InFlexData(), scale
-
 
 class Mxfp4TritonKernelBackend(MoEBackend):
     supported_arches = frozenset({"any"})
@@ -103,7 +58,6 @@ class Mxfp4TritonKernelBackend(MoEBackend):
         quant_config: object,
         routing_config: dict | None = None,
     ):
-        del routing_config
         self.key = key
         self.spec = spec
         self.quant_config = quant_config
@@ -114,6 +68,7 @@ class Mxfp4TritonKernelBackend(MoEBackend):
             and quant_config.is_w4a8_fp8
             and current_platform().is_amd
         )
+        self.kernel_context: tokenspeed_kernel.KernelContext | None = None
 
     @classmethod
     def supports(cls, spec: MoELayerSpec, quant_config: object) -> bool:
@@ -231,6 +186,10 @@ class Mxfp4TritonKernelBackend(MoEBackend):
 
         layer.w13_weight_triton_tensor = w13_weight
         layer.w2_weight_triton_tensor = w2_weight
+        self.kernel_context = tokenspeed_kernel.KernelContext()
+        self.kernel_context.namespace("tokenspeed_kernel.ops.moe.selection")[
+            "solution"
+        ] = "triton"
         # Free original weights (replaced by shuffled versions)
         del layer.w13_weight
         del layer.w2_weight
@@ -248,80 +207,82 @@ class Mxfp4TritonKernelBackend(MoEBackend):
         top_k = topk_output.topk_config.top_k
         n_tokens = router_logits.shape[0]
 
-        ragged_metadata, gather_indx, scatter_indx, gate_scal = (
-            tokenspeed_kernel.moe_route(
-                router_logits,
-                top_k,
-                sm_first=False,
-                dtype=router_logits.dtype,
-                traits={"output_type": "ragged_metadata"},
-                expected_kernel_name="triton_kernels_routing",
+        kernel_context = self.kernel_context
+        if kernel_context is None:
+            raise RuntimeError("MXFP4 triton_kernels MoE weights are not prepared")
+
+        with kernel_context.use():
+            ragged_metadata, gather_indx, scatter_indx, gate_scal = (
+                tokenspeed_kernel.moe_route(
+                    router_logits,
+                    top_k,
+                    sm_first=False,
+                    dtype=router_logits.dtype,
+                    traits={"output_type": "ragged_metadata"},
+                )
             )
-        )
 
-        w13_weight = layer.w13_weight_triton_tensor
-        w2_weight = layer.w2_weight_triton_tensor
-        w13_bias = getattr(layer, "w13_weight_bias", None)
-        w2_bias = getattr(layer, "w2_weight_bias", None)
-        w13_pc = getattr(layer, "w13_precision_config", None)
-        w2_pc = getattr(layer, "w2_precision_config", None)
+            w13_weight = layer.w13_weight_triton_tensor
+            w2_weight = layer.w2_weight_triton_tensor
+            w13_bias = getattr(layer, "w13_weight_bias", None)
+            w2_bias = getattr(layer, "w2_weight_bias", None)
+            w13_pc = getattr(layer, "w13_precision_config", None)
+            w2_pc = getattr(layer, "w2_precision_config", None)
 
-        gemm1_alpha = self._swiglu_arg.alpha if self._swiglu_arg else 1.702
-        gemm1_clamp = self._swiglu_arg.limit if self._swiglu_arg else 7.0
+            gemm1_alpha = self._swiglu_arg.alpha if self._swiglu_arg else 1.702
+            gemm1_clamp = self._swiglu_arg.limit if self._swiglu_arg else 7.0
 
-        act = FusedActivation(
-            FnSpecs("swiglu", swiglu_fn, ("alpha", "limit"), reduction_n=2),
-            (gemm1_alpha, gemm1_clamp),
-        )
-
-        if self._is_w4a8_fp8:
-            gemm1_input = tokenspeed_kernel.quantize_fp8(
-                hidden_states,
-                scale=layer.w13_act_scale,
-                solution="triton",
+            act = FusedActivation(
+                FnSpecs("swiglu", swiglu_fn, ("alpha", "limit"), reduction_n=2),
+                (gemm1_alpha, gemm1_clamp),
             )
-        else:
-            gemm1_input = hidden_states
 
-        # First GEMM: gate_up projection with fused activation
-        intermediate_cache = tokenspeed_kernel.moe_experts(
-            gemm1_input,
-            w13_weight,
-            w13_bias,
-            a_ragged_metadata=ragged_metadata,
-            gather_indx=gather_indx,
-            precision_config=w13_pc,
-            fused_activation=act,
-            dtype=hidden_states.dtype,
-            features={"ragged_metadata", "dispatch_gemm"},
-            expected_kernel_name="triton_kernels_dispatch_gemm",
-        )
+            if self._is_w4a8_fp8:
+                gemm1_input = tokenspeed_kernel.quantize_fp8(
+                    hidden_states,
+                    scale=layer.w13_act_scale,
+                    solution="triton",
+                )
+            else:
+                gemm1_input = hidden_states
 
-        if self._is_w4a8_fp8:
-            gemm2_input = tokenspeed_kernel.quantize_fp8(
-                intermediate_cache,
-                scale=layer.w2_act_scale,
-                solution="triton",
+            # First GEMM: gate_up projection with fused activation
+            intermediate_cache = tokenspeed_kernel.moe_experts(
+                gemm1_input,
+                w13_weight,
+                w13_bias,
+                a_ragged_metadata=ragged_metadata,
+                gather_indx=gather_indx,
+                precision_config=w13_pc,
+                fused_activation=act,
+                dtype=hidden_states.dtype,
+                features={"ragged_metadata", "dispatch_gemm"},
             )
-        else:
-            gemm2_input = intermediate_cache
 
-        # Second GEMM: down projection with scatter (combine)
-        # gammas applies the routing weights (expert contribution weights)
-        return tokenspeed_kernel.moe_experts(
-            gemm2_input,
-            w2_weight,
-            w2_bias,
-            a_ragged_metadata=ragged_metadata,
-            scatter_indx=scatter_indx,
-            precision_config=w2_pc,
-            gammas=gate_scal,
-            n_tokens=n_tokens,
-            n_expts_act=top_k,
-            dtype=hidden_states.dtype,
-            features={"ragged_metadata", "gemm_combine"},
-            expected_kernel_name="triton_kernels_gemm_combine",
-        )
+            if self._is_w4a8_fp8:
+                gemm2_input = tokenspeed_kernel.quantize_fp8(
+                    intermediate_cache,
+                    scale=layer.w2_act_scale,
+                    solution="triton",
+                )
+            else:
+                gemm2_input = intermediate_cache
+
+            # Second GEMM: down projection with scatter (combine)
+            # gammas applies the routing weights (expert contribution weights)
+            return tokenspeed_kernel.moe_experts(
+                gemm2_input,
+                w2_weight,
+                w2_bias,
+                a_ragged_metadata=ragged_metadata,
+                scatter_indx=scatter_indx,
+                precision_config=w2_pc,
+                gammas=gate_scal,
+                n_tokens=n_tokens,
+                n_expts_act=top_k,
+                dtype=hidden_states.dtype,
+                features={"ragged_metadata", "gemm_combine"},
+            )
 
 
 __all__ = ["Mxfp4TritonKernelBackend"]
