@@ -71,6 +71,11 @@ class SelectedKernel:
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.impl(*args, **kwargs)
 
+    def instantiate(self, *args: Any, **kwargs: Any) -> Any:
+        if not isinstance(self.impl, type):
+            raise TypeError(f"Kernel {self.name!r} is a function, not a class")
+        return self.impl(*args, **kwargs)
+
     def __repr__(self) -> str:
         return f"SelectedKernel(name={self.name!r})"
 

@@ -27,7 +27,12 @@ import pytest
 import tokenspeed_kernel.ops.gemm as gemm
 import torch
 from tokenspeed_kernel.platform import PlatformInfo
-from tokenspeed_kernel.registry import KernelRegistry, KernelSpec
+from tokenspeed_kernel.registry import (
+    KernelRegistry,
+    KernelSpec,
+    Priority,
+    register_kernel,
+)
 from tokenspeed_kernel.selection import (
     AutotuneParams,
     NoKernelFoundError,
@@ -599,6 +604,89 @@ class TestSelectKernel:
             platform=h100_platform,
         )
         assert callable(impl)
+
+    def test_stateful_kernel_class_selected_once(self, h100_platform):
+        @register_kernel(
+            "stateful",
+            "forward",
+            name="portable_stateful",
+            solution="python",
+            signatures={INPUT_BF16},
+            priority=Priority.PORTABLE,
+        )
+        class Portable:
+            def __init__(self, scale):
+                self.scale = scale
+                self.calls = 0
+
+            def forward(self, x):
+                self.calls += 1
+                return self.scale * x + self.calls
+
+        @register_kernel(
+            "stateful",
+            "forward",
+            name="specialized_stateful",
+            solution="python",
+            signatures={INPUT_BF16},
+            traits={"head_dim": frozenset({128})},
+            priority=Priority.SPECIALIZED,
+        )
+        class Specialized(Portable):
+            pass
+
+        selected = select_kernel(
+            "stateful",
+            "forward",
+            INPUT_BF16,
+            platform=h100_platform,
+            traits={"head_dim": 128},
+        )
+        assert selected.name == "specialized_stateful"
+        assert selected.impl is Specialized
+        first = selected.instantiate(2)
+        second = selected.instantiate(3)
+        assert (first.forward(4), first.forward(4)) == (9, 10)
+        assert second.forward(4) == 13
+        assert first.calls == 2
+        assert second.calls == 1
+        assert (
+            select_kernel(
+                "stateful",
+                "forward",
+                INPUT_BF16,
+                platform=h100_platform,
+                traits={"head_dim": 128},
+            )
+            is selected
+        )
+        assert (
+            select_kernel(
+                "stateful",
+                "forward",
+                INPUT_BF16,
+                platform=h100_platform,
+                traits={"head_dim": 64},
+            ).impl
+            is Portable
+        )
+
+    def test_function_kernel_cannot_be_instantiated(self, h100_platform):
+        @register_kernel(
+            "stateless",
+            "forward",
+            solution="python",
+            signatures={INPUT_BF16},
+        )
+        def stateless(x):
+            return x + 1
+
+        selected = select_kernel(
+            "stateless", "forward", INPUT_BF16, platform=h100_platform
+        )
+        assert selected(2) == 3
+        with pytest.raises(TypeError, match="not a class"):
+            selected.instantiate()
 
     def test_cached_on_second_call(self, sample_specs, h100_platform):
         reg = KernelRegistry.get()
