@@ -614,8 +614,9 @@ class TestSelectKernel:
             signatures={INPUT_BF16},
             priority=Priority.PORTABLE,
         )
-        class Portable:
+        class Portable(torch.nn.Module):
             def __init__(self, scale):
+                super().__init__()
                 self.scale = scale
                 self.calls = 0
 
@@ -644,10 +645,10 @@ class TestSelectKernel:
         )
         assert selected.name == "specialized_stateful"
         assert selected.impl is Specialized
-        first = selected.instantiate(2)
-        second = selected.instantiate(3)
-        assert (first.forward(4), first.forward(4)) == (9, 10)
-        assert second.forward(4) == 13
+        first = selected(2)
+        second = selected(3)
+        assert (first(4), first(4)) == (9, 10)
+        assert second(4) == 13
         assert first.calls == 2
         assert second.calls == 1
         assert (
@@ -671,7 +672,7 @@ class TestSelectKernel:
             is Portable
         )
 
-    def test_function_kernel_cannot_be_instantiated(self, h100_platform):
+    def test_function_kernel_still_callable(self, h100_platform):
         @register_kernel(
             "stateless",
             "forward",
@@ -685,8 +686,6 @@ class TestSelectKernel:
             "stateless", "forward", INPUT_BF16, platform=h100_platform
         )
         assert selected(2) == 3
-        with pytest.raises(TypeError, match="not a class"):
-            selected.instantiate()
 
     def test_cached_on_second_call(self, sample_specs, h100_platform):
         reg = KernelRegistry.get()
