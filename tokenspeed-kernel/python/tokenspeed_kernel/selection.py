@@ -42,6 +42,7 @@ __all__ = [
     "AutotuneParams",
     "SelectionPolicy",
     "select_kernel",
+    "resolve_kernel_override",
     "set_selection_policy",
     "register_oracle",
     "kernel_override",
@@ -454,6 +455,16 @@ def _log_selection(
         )
 
 
+def resolve_kernel_override(family: str, mode: str, override: str | None) -> str | None:
+    """Resolve the effective kernel name for family/mode, or return None.
+
+    The environment takes precedence over the context manager and call-site
+    override. Dispatch shortcuts must use this before consulting tuned routes.
+    """
+    env_key = f"TOKENSPEED_KERNEL_OVERRIDE_{family.upper()}_{mode.upper()}"
+    return os.environ.get(env_key) or _global_overrides.get((family, mode)) or override
+
+
 def select_kernel(
     family: str,
     mode: str,
@@ -489,16 +500,7 @@ def select_kernel(
     """
     platform = platform or current_platform()
 
-    # Context-manager global overrides
-    global_override = _global_overrides.get((family, mode))
-    if global_override:
-        override = global_override
-
-    # Environment variables take precedence over context-manager overrides.
-    env_key = f"TOKENSPEED_KERNEL_OVERRIDE_{family.upper()}_{mode.upper()}"
-    env_override = os.environ.get(env_key)
-    if env_override:
-        override = env_override
+    override = resolve_kernel_override(family, mode, override)
     registry = KernelRegistry.get()
 
     # Fast path: check cache (skipped when override is active)
@@ -690,12 +692,10 @@ def explain_selection(
             missing = spec.capability.missing_features(platform)
             if missing:
                 reasons.append(f"missing features: {', '.join(missing)}")
-            if spec.capability.min_arch_version:
-                if not (platform.arch_version >= spec.capability.min_arch_version):
-                    reasons.append(
-                        f"arch mismatch (requires "
-                        f"{spec.capability.min_arch_version})"
-                    )
+            min_arch_version = spec.capability.min_arch_version_for(platform.vendor)
+            if min_arch_version:
+                if not (platform.arch_version >= min_arch_version):
+                    reasons.append(f"arch mismatch (requires {min_arch_version})")
             if format_signature and not spec.supports_format_signature(
                 format_signature
             ):
