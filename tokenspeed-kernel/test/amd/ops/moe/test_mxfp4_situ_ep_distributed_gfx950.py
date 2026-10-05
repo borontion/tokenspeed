@@ -30,12 +30,14 @@ from __future__ import annotations
 import os
 
 import pytest
-import tokenspeed_kernel
 import torch
 import torch.distributed as dist
 from kimi3_reference import (
     mxfp4_moe_reference,
 )
+from tokenspeed_kernel.ops.moe import moe_apply as kernel_moe_apply
+from tokenspeed_kernel.ops.moe import moe_plan as kernel_moe_plan
+from tokenspeed_kernel.ops.moe import moe_process_weights as kernel_moe_process_weights
 from utils import make_mxfp4_moe_weights
 
 
@@ -101,7 +103,7 @@ def test_distributed_ep_partial_sum_matches_global_reference() -> None:
     module.activation_situ_beta = 4.0
     module.activation_situ_linear_beta = 25.0
 
-    plan = tokenspeed_kernel.moe_plan(
+    plan = kernel_moe_plan(
         "mxfp4",
         input_dtype=torch.bfloat16,
         activation="situ",
@@ -117,8 +119,8 @@ def test_distributed_ep_partial_sum_matches_global_reference() -> None:
         fast_math=True,
         combine_order="rank",
     )
-    tokenspeed_kernel.moe_process_weights(plan, module)
-    partial = tokenspeed_kernel.moe_apply(
+    kernel_moe_process_weights(plan, module)
+    partial = kernel_moe_apply(
         plan,
         hidden_states,
         module,
